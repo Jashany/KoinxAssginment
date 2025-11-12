@@ -1,5 +1,5 @@
 import "./events";
-import { getEntry, initializeP2P, addScanEvent, getLocalState, getConnectedDevicesCount, getTimeSinceLastSync, getPendingBroadcastsCount } from "./state";
+import { getEntry, initializeP2P, addScanEvent, getLocalState, getConnectedDevicesCount, getTimeSinceLastSync, getPendingBroadcastsCount, getConnectedPeers, printPeerIPs } from "./state";
 import { getTodayKey } from "./utils";
 import { ScanValidationResult } from "./types";
 import * as Storage from "./storage";
@@ -83,5 +83,7 @@ export {
   getLocalState,
   getConnectedDevicesCount,
   getTimeSinceLastSync,
-  getPendingBroadcastsCount
+  getPendingBroadcastsCount,
+  getConnectedPeers,
+  printPeerIPs
 };

@@ -131,6 +131,43 @@ export function sendDelta(data: string | Uint8Array): Promise<void> {
 }
 
 /**
+ * Send data to a specific peer (unicast).
+ * @param data - The data to send (string or Buffer/Uint8Array)
+ * @param peerAddress - The IP address of the peer
+ * @returns Promise that resolves when message is sent
+ */
+export function sendDeltaToPeer(data: string | Uint8Array, peerAddress: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!socket) {
+      console.warn("Socket not initialised – call initSocket() first");
+      reject(new Error("Socket not initialized"));
+      return;
+    }
+
+    // Convert string to Uint8Array if needed
+    const message =
+      typeof data === "string" ? new TextEncoder().encode(data) : data;
+
+    // Send the message to specific peer
+    socket.send(
+      message,
+      0,
+      message.length,
+      PORT,
+      peerAddress,
+      (err?: Error | null) => {
+        if (err) {
+          console.error(`Unicast to ${peerAddress} failed:`, err);
+          reject(err);
+        } else {
+          resolve();
+        }
+      },
+    );
+  });
+}
+
+/**
  * Change broadcast target (useful for directed broadcasts).
  */
 export function setBroadcastAddr(addr: string) {

@@ -27,6 +27,7 @@ export interface DeviceInfo {
   deviceId: string;
   lastSequence: number;
   lastSeen: number;
+  ipAddress?: string; // Peer's IP address for unicast
 }
 
 export interface ScanValidationResult {

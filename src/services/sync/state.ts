@@ -2,7 +2,7 @@
 import * as Network from "expo-network";
 import * as Crypto from 'expo-crypto';
 import { serviceEvents } from "./events";
-import { initSocket, setBroadcastAddr, sendDelta } from "./network";
+import { initSocket, setBroadcastAddr, sendDelta, sendDeltaToPeer } from "./network";
 import { LocalState, PassState, ScanEvent, StateMessage, DeviceInfo } from "./types";
 import * as Storage from "./storage";
 
@@ -78,15 +78,30 @@ export async function initializeP2P() {
     // 6. Get IP and set broadcast address
     try {
       const ip = await Network.getIpAddressAsync();
+      console.log(`Device IP from expo-network: ${ip}`);
+      
       if (ip && ip !== "0.0.0.0") {
         const broadcastAddr = ip.replace(/\d+$/, "255");
         setBroadcastAddr(broadcastAddr);
         console.log(`UDP Broadcast to ${broadcastAddr}`);
       } else {
-        console.warn("No valid IP address found (maybe on emulator or no WiFi)");
+        // IP is 0.0.0.0 - likely hotspot host with no internet
+        // Try common Android hotspot subnets
+        console.warn("IP is 0.0.0.0 (hotspot host or no network)");
+        console.log("Trying common hotspot broadcast addresses:");
+        console.log("  - 192.168.43.255 (Android hotspot)");
+        console.log("  - 192.168.137.255 (Windows hotspot)");
+        console.log("  - 172.20.10.255 (iPhone hotspot)");
+        
+        // Default to Android hotspot (most common)
+        setBroadcastAddr("192.168.43.255");
+        console.log("Using broadcast: 192.168.43.255");
+        console.log("Note: Unicast will work once peers are discovered");
       }
     } catch (ipError) {
-      console.warn("Failed to get IP address, continuing with default:", ipError);
+      console.warn("Failed to get IP address, using fallback:", ipError);
+      setBroadcastAddr("192.168.43.255");
+      console.log("Using fallback broadcast: 192.168.43.255");
     }
 
     // 7. Load known devices from database
@@ -177,7 +192,7 @@ export async function addScanEvent(qrCode: string, date: string): Promise<ScanEv
 }
 
 /**
- * Broadcast delta changes to all peers
+ * Broadcast delta changes to all peers (using unicast)
  */
 async function broadcastDelta(deltas: ScanEvent[]) {
   sequenceNumber++;
@@ -192,20 +207,15 @@ async function broadcastDelta(deltas: ScanEvent[]) {
 
   const messageStr = JSON.stringify(message);
 
-  try {
-    await sendDelta(messageStr);
-    console.log(`Broadcasted delta with ${deltas.length} scans`);
-  } catch (error) {
-    console.error('Failed to broadcast delta, adding to queue:', error);
-    // Add to queue for retry
-    await Storage.enqueueBroadcast(messageStr);
-  }
+  // Send to each known peer individually (unicast)
+  await sendToAllPeers(messageStr);
+  console.log(`Sent delta with ${deltas.length} scans to ${knownDevices.size} peers`);
 }
 
 /**
  * Listen for incoming messages from peers
  */
-serviceEvents.on("message", async (messageStr: string) => {
+serviceEvents.on("message", async (messageStr: string, rinfo: any) => {
   try {
     const message: StateMessage = JSON.parse(messageStr);
 
@@ -214,14 +224,26 @@ serviceEvents.on("message", async (messageStr: string) => {
       return;
     }
 
-    // Update known devices
+    // Update known devices with IP address for unicast
     const deviceInfo: DeviceInfo = {
       deviceId: message.deviceId,
       lastSequence: message.sequenceNum,
       lastSeen: Date.now(),
+      ipAddress: rinfo?.address, // Capture sender's IP
     };
+    
+    // Check if this is a new peer
+    const isNewPeer = !knownDevices.has(message.deviceId);
+    
     knownDevices.set(message.deviceId, deviceInfo);
     await Storage.updateDeviceState(deviceInfo);
+    
+    if (isNewPeer) {
+      console.log(`🆕 NEW PEER DISCOVERED: ${message.deviceId.substring(0, 8)}... at IP: ${rinfo?.address}`);
+      printPeerIPs();
+    } else {
+      console.log(`Received message from peer ${message.deviceId.substring(0, 8)}... at ${rinfo?.address}`);
+    }
 
     // Handle different message types
     switch (message.type) {
@@ -318,6 +340,37 @@ function sortScans(scans: ScanEvent[]) {
 }
 
 /**
+ * Send message to all known peers using unicast
+ */
+async function sendToAllPeers(messageStr: string) {
+  const peers = Array.from(knownDevices.values());
+  
+  if (peers.length === 0) {
+    // No known peers yet, use broadcast for discovery
+    try {
+      await sendDelta(messageStr);
+      console.log('No known peers, sent broadcast for discovery');
+    } catch (error) {
+      console.error('Failed to send broadcast:', error);
+      await Storage.enqueueBroadcast(messageStr);
+    }
+    return;
+  }
+
+  // Send to each peer individually
+  for (const peer of peers) {
+    if (peer.ipAddress) {
+      try {
+        await sendDeltaToPeer(messageStr, peer.ipAddress);
+      } catch (error) {
+        console.error(`Failed to send to peer ${peer.deviceId} at ${peer.ipAddress}:`, error);
+        await Storage.enqueueBroadcast(messageStr);
+      }
+    }
+  }
+}
+
+/**
  * Request full state from all peers
  */
 async function requestFullStateFromPeers() {
@@ -330,16 +383,19 @@ async function requestFullStateFromPeers() {
     timestamp: Date.now(),
   };
 
+  const messageStr = JSON.stringify(message);
+  
+  // Use broadcast for initial discovery
   try {
-    await sendDelta(JSON.stringify(message));
-    console.log('Requested full state from peers');
+    await sendDelta(messageStr);
+    console.log('Requested full state from peers (broadcast)');
   } catch (error) {
     console.error('Failed to request full state:', error);
   }
 }
 
 /**
- * Broadcast full state to all peers
+ * Broadcast full state to all peers (using unicast)
  */
 async function broadcastFullState() {
   sequenceNumber++;
@@ -352,12 +408,11 @@ async function broadcastFullState() {
     timestamp: Date.now(),
   };
 
-  try {
-    await sendDelta(JSON.stringify(message));
-    console.log('Broadcasted full state to peers');
-  } catch (error) {
-    console.error('Failed to broadcast full state:', error);
-  }
+  const messageStr = JSON.stringify(message);
+  
+  // Send to all known peers
+  await sendToAllPeers(messageStr);
+  console.log('Sent full state to peers');
 }
 
 /**
@@ -428,6 +483,48 @@ export function getConnectedDevicesCount(): number {
   }
 
   return count;
+}
+
+/**
+ * Get all connected peer IPs
+ * Returns array of peer info with deviceId and IP address
+ */
+export function getConnectedPeers(): Array<{ deviceId: string; ipAddress: string; lastSeen: number }> {
+  const now = Date.now();
+  const timeout = 90000; // 90 seconds
+
+  const peers: Array<{ deviceId: string; ipAddress: string; lastSeen: number }> = [];
+  
+  for (const device of knownDevices.values()) {
+    if (now - device.lastSeen < timeout && device.ipAddress) {
+      peers.push({
+        deviceId: device.deviceId,
+        ipAddress: device.ipAddress,
+        lastSeen: device.lastSeen,
+      });
+    }
+  }
+
+  return peers;
+}
+
+/**
+ * Print all connected peer IPs to console
+ */
+export function printPeerIPs(): void {
+  const peers = getConnectedPeers();
+  
+  if (peers.length === 0) {
+    console.log('No connected peers found');
+    return;
+  }
+
+  console.log(`\n=== Connected Peers (${peers.length}) ===`);
+  peers.forEach((peer, index) => {
+    const secondsAgo = Math.floor((Date.now() - peer.lastSeen) / 1000);
+    console.log(`${index + 1}. Device: ${peer.deviceId.substring(0, 8)}... | IP: ${peer.ipAddress} | Last seen: ${secondsAgo}s ago`);
+  });
+  console.log('========================\n');
 }
 
 /**

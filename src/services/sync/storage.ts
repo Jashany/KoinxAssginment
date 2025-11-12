@@ -39,7 +39,8 @@ export async function initDatabase(): Promise<void> {
       CREATE TABLE IF NOT EXISTS device_state (
         device_id TEXT PRIMARY KEY,
         last_sequence INTEGER NOT NULL,
-        last_seen INTEGER NOT NULL
+        last_seen INTEGER NOT NULL,
+        ip_address TEXT
       );
     `);
 
@@ -224,9 +225,9 @@ export async function updateDeviceState(deviceInfo: DeviceInfo): Promise<void> {
 
   try {
     await db.runAsync(
-      `INSERT OR REPLACE INTO device_state (device_id, last_sequence, last_seen)
-       VALUES (?, ?, ?)`,
-      [deviceInfo.deviceId, deviceInfo.lastSequence, deviceInfo.lastSeen]
+      `INSERT OR REPLACE INTO device_state (device_id, last_sequence, last_seen, ip_address)
+       VALUES (?, ?, ?, ?)`,
+      [deviceInfo.deviceId, deviceInfo.lastSequence, deviceInfo.lastSeen, deviceInfo.ipAddress || null]
     );
   } catch (error) {
     console.error('Failed to update device state:', error);
@@ -245,8 +246,9 @@ export async function getDeviceState(deviceId: string): Promise<DeviceInfo | nul
       device_id: string;
       last_sequence: number;
       last_seen: number;
+      ip_address: string | null;
     }>(
-      'SELECT device_id, last_sequence, last_seen FROM device_state WHERE device_id = ?',
+      'SELECT device_id, last_sequence, last_seen, ip_address FROM device_state WHERE device_id = ?',
       [deviceId]
     );
 
@@ -256,6 +258,7 @@ export async function getDeviceState(deviceId: string): Promise<DeviceInfo | nul
       deviceId: row.device_id,
       lastSequence: row.last_sequence,
       lastSeen: row.last_seen,
+      ipAddress: row.ip_address || undefined,
     };
   } catch (error) {
     console.error('Failed to get device state:', error);
@@ -274,12 +277,14 @@ export async function getAllDeviceStates(): Promise<DeviceInfo[]> {
       device_id: string;
       last_sequence: number;
       last_seen: number;
-    }>('SELECT device_id, last_sequence, last_seen FROM device_state');
+      ip_address: string | null;
+    }>('SELECT device_id, last_sequence, last_seen, ip_address FROM device_state');
 
     return rows.map(row => ({
       deviceId: row.device_id,
       lastSequence: row.last_sequence,
       lastSeen: row.last_seen,
+      ipAddress: row.ip_address || undefined,
     }));
   } catch (error) {
     console.error('Failed to get all device states:', error);
