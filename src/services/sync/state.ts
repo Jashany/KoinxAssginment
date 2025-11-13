@@ -46,31 +46,8 @@ let ackRetryInterval: ReturnType<typeof setInterval> | null = null;
 // State hash reconciliation interval
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
 
-// QR codes list (hardcoded for now)
-export const QR_CODES = [
-  // Infinite passes
-  "SAT25IBLXRRU",
-  "SAT25IPGOP23",
-  "SAT25I32LFFI",
-  "SAT25IB2JHC0",
-  "SAT25IIPXM4M",
-  "SAT25I5N8EKB",
-  "SAT25ITPC3AZ",
-  "SAT25IW6YXON",
-  "SAT25ITUBCAP",
-  "SAT25I8JOGTS",
-  // One-use passes
-  "SAT25SD724M2",
-  "SAT25S9NHZT5",
-  "SAT25SLTAAGR",
-  "SAT25SCA78P3",
-  "SAT25SI3IVAX",
-  "SAT25SWRG0M5",
-  "SAT25S36GKMG",
-  "SAT25SJ5CNQK",
-  "SAT25S5SCQG0",
-  "SAT25SEK2YC1",
-];
+// QR codes list - dynamically loaded from qr_config.json
+export let QR_CODES: string[] = [];
 
 /**
  * Calculate hash of current state for reconciliation
@@ -286,6 +263,10 @@ async function loadAndSaveJSONConfig() {
       console.log('✅ [JSON CONFIG] Saved initial config to database');
     }
 
+    // Populate QR_CODES array from the loaded config
+    QR_CODES = Object.keys(jsonConfigState);
+    console.log(`✅ [JSON CONFIG] Populated QR_CODES array with ${QR_CODES.length} codes from config`);
+
     // Log summary
     const qrCount = Object.keys(jsonConfigState).length;
     const infiniteCount = Object.values(jsonConfigState).filter(
@@ -298,6 +279,7 @@ async function loadAndSaveJSONConfig() {
     console.error('❌ [JSON CONFIG] Error loading/saving JSON config:', error);
     // Fallback to initial config
     jsonConfigState = { ...INITIAL_QR_CONFIG };
+    QR_CODES = Object.keys(jsonConfigState);
   }
 }
 
