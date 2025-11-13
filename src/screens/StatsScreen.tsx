@@ -1,4 +1,4 @@
-import { getLocalState } from "../services/sync";
+import { getLocalState, getJSONConfigState } from "../services/sync";
 import { LocalState, PassState } from "../services/sync/types";
 import { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, View, Text } from "react-native";
@@ -15,8 +15,22 @@ interface PassEntry {
 }
 
 // Helper function to transform PassState to PassEntry
-const transformToPassEntry = (passState: PassState): PassEntry => {
-  // Count scans per date
+const transformToPassEntry = (passState: PassState | undefined, qrCode: string, jsonConfig: any): PassEntry => {
+  // If no scans yet, use the JSON config defaults
+  if (!passState) {
+    const configEntry = jsonConfig[qrCode];
+    return {
+      type: configEntry?.type || "one-use",
+      "14nov": configEntry?.["14nov"] || false,
+      "15nov": configEntry?.["15nov"] || false,
+      "16nov": configEntry?.["16nov"] || false,
+      ...(configEntry?.type === "infinite" && {
+        count: configEntry?.count || 0,
+      }),
+    };
+  }
+
+  // Count scans per date from actual scan events
   const scansBy14nov = passState.scans.filter(s => s.date === "14nov").length;
   const scansBy15nov = passState.scans.filter(s => s.date === "15nov").length;
   const scansBy16nov = passState.scans.filter(s => s.date === "16nov").length;
@@ -52,23 +66,28 @@ const COLORS = {
 
 export default function StatsScreen() {
   const [state, setState] = useState<LocalState>(getLocalState());
+  const [jsonConfig, setJsonConfig] = useState<any>(getJSONConfigState());
 
   useEffect(() => {
     setState(getLocalState());
+    setJsonConfig(getJSONConfigState());
   }, []);
 
-  const infinitePasses = Object.entries(state)
-    .filter(([_, pass]) => pass.type === "infinite")
+  // Get all QR codes from JSON config (this includes all codes, not just scanned ones)
+  const allQRCodes = Object.keys(jsonConfig);
+
+  const infinitePasses = allQRCodes
+    .filter((code) => jsonConfig[code]?.type === "infinite")
     .map(
-      ([code, pass]) =>
-        [code, transformToPassEntry(pass)] as [string, PassEntry],
+      (code) =>
+        [code, transformToPassEntry(state[code], code, jsonConfig)] as [string, PassEntry],
     );
 
-  const oneUsePasses = Object.entries(state)
-    .filter(([_, pass]) => pass.type === "one-use")
+  const oneUsePasses = allQRCodes
+    .filter((code) => jsonConfig[code]?.type === "one-use")
     .map(
-      ([code, pass]) =>
-        [code, transformToPassEntry(pass)] as [string, PassEntry],
+      (code) =>
+        [code, transformToPassEntry(state[code], code, jsonConfig)] as [string, PassEntry],
     );
 
   const totalInfinite = infinitePasses.length;
@@ -120,7 +139,7 @@ export default function StatsScreen() {
           <PassSection title="One-Use Passes" passes={oneUsePasses} />
         )}
 
-        {Object.keys(state).length === 0 && (
+        {allQRCodes.length === 0 && (
           <Text style={styles.empty}>No passes found.</Text>
         )}
       </ScrollView>
