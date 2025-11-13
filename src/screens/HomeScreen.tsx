@@ -1,32 +1,74 @@
 import { useCameraPermissions } from "expo-camera";
 import { StatusBar } from "expo-status-bar";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, Text, View, ScrollView, RefreshControl } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import SyncStatus from "../components/SyncStatus";
 import { Scan, ChartBar, ChevronRight, Camera ,AlertCircle} from "lucide-react-native";
 import type { StackScreenProps } from '@react-navigation/stack';
 import { RootStackParamList } from '../navigation/AppNavigator';
+import { useState } from "react";
+import { requestFullStateFromPeers, printPeerIPs } from "../services/sync/state";
 
 type Props = StackScreenProps<RootStackParamList, 'Home'>;
 
 export default function HomeScreen({ navigation }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
+  const [refreshing, setRefreshing] = useState(false);
 
   const isPermissionGranted = Boolean(permission?.granted);
 
+  const onRefresh = async () => {
+    setRefreshing(true);
+    console.log('🔄 [REFRESH] User triggered refresh - rescanning for peers...');
+    
+    try {
+      // Request full state from all peers (triggers peer discovery)
+      await requestFullStateFromPeers();
+      console.log('✅ [REFRESH] Peer discovery broadcast sent');
+      
+      // Print current peer list
+      printPeerIPs();
+    } catch (error) {
+      console.error('❌ [REFRESH] Failed to rescan for peers:', error);
+    } finally {
+      // Keep spinner visible for at least 1 second for better UX
+      setTimeout(() => {
+        setRefreshing(false);
+        console.log('✅ [REFRESH] Refresh complete');
+      }, 1000);
+    }
+  };
+
   return (
-    <SafeAreaView className="flex-1 w-full h-full items-center justify-between px-6 pt-10 bg-zinc-950">
+    <SafeAreaView className="flex-1 w-full h-full bg-zinc-950">
       <StatusBar style="light" />
       
-      {/* Header Section */}
-      <View className="items-center w-full mt-5">
-        <Text className="text-3xl font-bold text-zinc-50 text-center mb-2 tracking-tight">
-          Scanturnalia
-        </Text>
-      </View>
+      <ScrollView
+        className="flex-1"
+        contentContainerStyle={{ flexGrow: 1, paddingHorizontal: 24, paddingTop: 40 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor="#71717a"
+            title="Scanning for peers..."
+            titleColor="#71717a"
+          />
+        }
+      >
+        <View className="flex-1 items-center justify-between">
+          {/* Header Section */}
+          <View className="items-center w-full mt-5">
+            <Text className="text-3xl font-bold text-zinc-50 text-center mb-2 tracking-tight">
+              Scanturnalia
+            </Text>
+            <Text className="text-sm text-zinc-500 text-center">
+              Pull down to scan for peers
+            </Text>
+          </View>
 
-      {/* Action Buttons */}
-      <View className="w-full my-10 gap-2.5 items-center">
+          {/* Action Buttons */}
+          <View className="w-full my-10 gap-2.5 items-center">
         {/* Request Permission Button */}
         {!isPermissionGranted && (
           <Pressable
@@ -106,9 +148,11 @@ export default function HomeScreen({ navigation }: Props) {
             <ChevronRight color="#71717a" size={24} strokeWidth={1.5} />
           </View>
         </Pressable>
-      </View>
+          </View>
 
-      <SyncStatus />
+          <SyncStatus />
+        </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }

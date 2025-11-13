@@ -56,38 +56,38 @@ export const QR_CODES = [
  */
 export async function initializeP2P() {
   try {
-    console.log("Initializing P2P service...");
+    console.log("🚀 [INIT] ========================================");
+    console.log("🚀 [INIT] Initializing P2P service...");
+    console.log("🚀 [INIT] ========================================");
 
     // 1. Initialize SQLite database
     await Storage.initDatabase();
+    console.log("✅ [INIT] SQLite database initialized");
 
     // 2. Generate or load device ID
     deviceId = uuidv4();
-    console.log(`Device ID: ${deviceId}`);
+    console.log(`✅ [INIT] Device ID: ${deviceId}`);
+    console.log(`   [INIT] Short ID: ${deviceId.substring(0, 8)}...`);
 
     // 3. Initialize UDP socket
     await initSocket();
+    console.log("✅ [INIT] UDP socket initialized");
 
     // 4. Initialize pass types in database
     await initializePassTypes();
+    console.log("✅ [INIT] Pass types initialized");
 
     // 5. Load state from database
     localState = await Storage.loadState(QR_CODES);
-    console.log("State loaded from database");
+    const totalScans = Object.values(localState).reduce((sum, pass) => sum + pass.scans.length, 0);
+    console.log(`✅ [INIT] State loaded from database: ${Object.keys(localState).length} QR codes, ${totalScans} total scans`);
 
     // 6. Get IP and set broadcast address
     try {
       const ip = await Network.getIpAddressAsync();
-      console.log(`Device IP from expo-network: ${ip}`);
+      console.log(`🌐 [INIT] Device IP from expo-network: ${ip}`);
       
       if (ip && ip !== "0.0.0.0") {
-        const broadcastAddr = ip.replace(/\d+$/, "255");
-        setBroadcastAddr(broadcastAddr);
-        console.log(`UDP Broadcast to ${broadcastAddr}`);
-      } else {
-        // IP is 0.0.0.0 - likely hotspot host with no internet
-        // Try common Android hotspot subnets
-        console.warn("IP is 0.0.0.0 (hotspot host or no network)");
         console.log("Trying common hotspot broadcast addresses:");
         console.log("  - 192.168.43.255 (Android hotspot)");
         console.log("  - 192.168.137.255 (Windows hotspot)");
@@ -170,6 +170,13 @@ export async function addScanEvent(qrCode: string, date: string): Promise<ScanEv
     date,
   };
 
+  console.log('📱 [LOCAL SCAN] Creating new scan event:', {
+    scanId: event.scanId.substring(0, 8) + '...',
+    qrCode: event.qrCode,
+    date: event.date,
+    deviceId: deviceId.substring(0, 8) + '...',
+  });
+
   // Add to in-memory state
   if (!localState[qrCode]) {
     const type = qrCode.includes('I') ? 'infinite' : 'one-use';
@@ -177,13 +184,17 @@ export async function addScanEvent(qrCode: string, date: string): Promise<ScanEv
       type,
       scans: [],
     };
+    console.log(`📝 [LOCAL SCAN] Initialized new QR code entry: ${qrCode} (${type})`);
   }
 
   localState[qrCode].scans.push(event);
   sortScans(localState[qrCode].scans);
 
+  console.log(`💾 [LOCAL SCAN] Saved to in-memory state. Total scans for ${qrCode}: ${localState[qrCode].scans.length}`);
+
   // Save to database
   await Storage.saveScanEvent(event);
+  console.log('✅ [LOCAL SCAN] Saved to SQLite database');
 
   // Broadcast to peers
   await broadcastDelta([event]);
@@ -205,11 +216,24 @@ async function broadcastDelta(deltas: ScanEvent[]) {
     timestamp: Date.now(),
   };
 
+  console.log('📤 [SENDING DELTA] Preparing to send delta:', {
+    type: message.type,
+    deltasCount: deltas.length,
+    sequenceNum: sequenceNumber,
+    deviceId: deviceId.substring(0, 8) + '...',
+    knownPeers: knownDevices.size,
+  });
+
+  deltas.forEach((delta, index) => {
+    console.log(`  📋 [DELTA ${index + 1}] QR: ${delta.qrCode}, ScanId: ${delta.scanId.substring(0, 8)}..., Date: ${delta.date}`);
+  });
+
   const messageStr = JSON.stringify(message);
+  console.log(`📦 [SENDING DELTA] Message size: ${messageStr.length} bytes`);
 
   // Send to each known peer individually (unicast)
   await sendToAllPeers(messageStr);
-  console.log(`Sent delta with ${deltas.length} scans to ${knownDevices.size} peers`);
+  console.log(`✅ [SENDING DELTA] Sent delta with ${deltas.length} scans to ${knownDevices.size} peers`);
 }
 
 /**
@@ -217,10 +241,15 @@ async function broadcastDelta(deltas: ScanEvent[]) {
  */
 serviceEvents.on("message", async (messageStr: string, rinfo: any) => {
   try {
+    console.log(`📥 [RECEIVED] Message from ${rinfo?.address}:${rinfo?.port}, size: ${messageStr.length} bytes`);
+    
     const message: StateMessage = JSON.parse(messageStr);
+
+    console.log(`📨 [RECEIVED] Message type: ${message.type}, from device: ${message.deviceId.substring(0, 8)}..., seq: ${message.sequenceNum}`);
 
     // Ignore messages from ourselves
     if (message.deviceId === deviceId) {
+      console.log('⏭️  [RECEIVED] Ignoring message from self');
       return;
     }
 
@@ -242,30 +271,38 @@ serviceEvents.on("message", async (messageStr: string, rinfo: any) => {
       console.log(`🆕 NEW PEER DISCOVERED: ${message.deviceId.substring(0, 8)}... at IP: ${rinfo?.address}`);
       printPeerIPs();
     } else {
-      console.log(`Received message from peer ${message.deviceId.substring(0, 8)}... at ${rinfo?.address}`);
+      console.log(`👋 [RECEIVED] Known peer ${message.deviceId.substring(0, 8)}... at ${rinfo?.address}`);
     }
 
     // Handle different message types
     switch (message.type) {
       case 'delta':
+        console.log(`🔄 [RECEIVED DELTA] Processing ${message.deltas?.length || 0} scan events`);
         if (message.deltas) {
+          message.deltas.forEach((delta, index) => {
+            console.log(`  📋 [DELTA ${index + 1}] QR: ${delta.qrCode}, ScanId: ${delta.scanId.substring(0, 8)}..., Date: ${delta.date}, From: ${delta.deviceId.substring(0, 8)}...`);
+          });
           await mergeDeltaScans(message.deltas);
         }
         break;
 
       case 'full-state':
+        console.log(`🔄 [RECEIVED FULL-STATE] Processing full state from peer`);
         if (message.fullState) {
+          const totalScans = Object.values(message.fullState).reduce((sum, pass) => sum + pass.scans.length, 0);
+          console.log(`  📊 [FULL-STATE] Contains ${Object.keys(message.fullState).length} QR codes with ${totalScans} total scans`);
           await mergeFullState(message.fullState);
         }
         break;
 
       case 'state-request':
+        console.log(`📢 [RECEIVED STATE-REQUEST] Peer requesting full state, sending ours...`);
         // Someone is requesting full state, send ours
         await broadcastFullState();
         break;
     }
   } catch (error) {
-    console.error('Error processing message:', error);
+    console.error('❌ [RECEIVED] Error processing message:', error);
   }
 });
 
@@ -273,9 +310,14 @@ serviceEvents.on("message", async (messageStr: string, rinfo: any) => {
  * Merge incoming scan events (CRDT logic)
  */
 async function mergeDeltaScans(incomingScans: ScanEvent[]) {
-  if (incomingScans.length === 0) return;
+  if (incomingScans.length === 0) {
+    console.log('⚠️  [MERGE] No scans to merge');
+    return;
+  }
 
+  console.log(`🔀 [MERGE] Starting merge of ${incomingScans.length} incoming scans`);
   const newScans: ScanEvent[] = [];
+  const duplicateScans: ScanEvent[] = [];
 
   for (const incomingScan of incomingScans) {
     const { qrCode } = incomingScan;
@@ -287,6 +329,7 @@ async function mergeDeltaScans(incomingScans: ScanEvent[]) {
         type,
         scans: [],
       };
+      console.log(`  📝 [MERGE] Initialized new QR code entry: ${qrCode} (${type})`);
     }
 
     // Check if we already have this scan (by scanId)
@@ -297,6 +340,10 @@ async function mergeDeltaScans(incomingScans: ScanEvent[]) {
     if (!exists) {
       localState[qrCode].scans.push(incomingScan);
       newScans.push(incomingScan);
+      console.log(`  ✅ [MERGE] NEW scan added: ${qrCode}, ScanId: ${incomingScan.scanId.substring(0, 8)}...`);
+    } else {
+      duplicateScans.push(incomingScan);
+      console.log(`  ⏭️  [MERGE] DUPLICATE scan skipped: ${qrCode}, ScanId: ${incomingScan.scanId.substring(0, 8)}...`);
     }
   }
 
@@ -308,8 +355,21 @@ async function mergeDeltaScans(incomingScans: ScanEvent[]) {
   // Save new scans to database
   if (newScans.length > 0) {
     await Storage.saveScanEvents(newScans);
-    console.log(`Merged ${newScans.length} new scans from peer`);
+    console.log(`💾 [MERGE] Saved ${newScans.length} new scans to SQLite database`);
+    
+    // Log summary
+    const qrCodeCounts: { [key: string]: number } = {};
+    newScans.forEach(scan => {
+      qrCodeCounts[scan.qrCode] = (qrCodeCounts[scan.qrCode] || 0) + 1;
+    });
+    console.log(`📊 [MERGE] Summary by QR code:`, qrCodeCounts);
+  } else {
+    console.log(`ℹ️  [MERGE] No new scans to save (${duplicateScans.length} duplicates ignored)`);
   }
+
+  // Log current state
+  const totalScans = Object.values(localState).reduce((sum, pass) => sum + pass.scans.length, 0);
+  console.log(`📈 [MERGE] Current total scans in memory: ${totalScans} across ${Object.keys(localState).length} QR codes`);
 }
 
 /**
@@ -345,35 +405,51 @@ function sortScans(scans: ScanEvent[]) {
 async function sendToAllPeers(messageStr: string) {
   const peers = Array.from(knownDevices.values());
   
+  console.log(`📡 [SEND TO PEERS] Attempting to send to ${peers.length} known peers`);
+  
   if (peers.length === 0) {
     // No known peers yet, use broadcast for discovery
+    console.log('🔍 [SEND TO PEERS] No known peers, using broadcast for discovery');
     try {
       await sendDelta(messageStr);
-      console.log('No known peers, sent broadcast for discovery');
+      console.log('✅ [SEND TO PEERS] Broadcast sent successfully');
     } catch (error) {
-      console.error('Failed to send broadcast:', error);
+      console.error('❌ [SEND TO PEERS] Failed to send broadcast:', error);
       await Storage.enqueueBroadcast(messageStr);
+      console.log('📥 [SEND TO PEERS] Message queued for retry');
     }
     return;
   }
 
   // Send to each peer individually
+  let successCount = 0;
+  let failCount = 0;
+  
   for (const peer of peers) {
     if (peer.ipAddress) {
       try {
+        console.log(`  📤 [UNICAST] Sending to peer ${peer.deviceId.substring(0, 8)}... at ${peer.ipAddress}`);
         await sendDeltaToPeer(messageStr, peer.ipAddress);
+        successCount++;
+        console.log(`  ✅ [UNICAST] Successfully sent to ${peer.ipAddress}`);
       } catch (error) {
-        console.error(`Failed to send to peer ${peer.deviceId} at ${peer.ipAddress}:`, error);
+        failCount++;
+        console.error(`  ❌ [UNICAST] Failed to send to peer ${peer.deviceId.substring(0, 8)}... at ${peer.ipAddress}:`, error);
         await Storage.enqueueBroadcast(messageStr);
+        console.log(`  📥 [UNICAST] Message queued for retry`);
       }
+    } else {
+      console.log(`  ⚠️  [UNICAST] Peer ${peer.deviceId.substring(0, 8)}... has no IP address`);
     }
   }
+  
+  console.log(`📊 [SEND TO PEERS] Results: ${successCount} successful, ${failCount} failed out of ${peers.length} peers`);
 }
 
 /**
  * Request full state from all peers
  */
-async function requestFullStateFromPeers() {
+export async function requestFullStateFromPeers() {
   sequenceNumber++;
 
   const message: StateMessage = {
@@ -400,6 +476,12 @@ async function requestFullStateFromPeers() {
 async function broadcastFullState() {
   sequenceNumber++;
 
+  const totalScans = Object.values(localState).reduce((sum, pass) => sum + pass.scans.length, 0);
+  const qrCodeCount = Object.keys(localState).length;
+
+  console.log(`📤 [SENDING FULL-STATE] Preparing full state broadcast`);
+  console.log(`  📊 [FULL-STATE] Contains ${qrCodeCount} QR codes with ${totalScans} total scans`);
+
   const message: StateMessage = {
     type: 'full-state',
     fullState: localState,
@@ -409,10 +491,11 @@ async function broadcastFullState() {
   };
 
   const messageStr = JSON.stringify(message);
+  console.log(`📦 [SENDING FULL-STATE] Message size: ${messageStr.length} bytes`);
   
   // Send to all known peers
   await sendToAllPeers(messageStr);
-  console.log('Sent full state to peers');
+  console.log('✅ [SENDING FULL-STATE] Full state sent to peers');
 }
 
 /**
@@ -476,12 +559,22 @@ export function getConnectedDevicesCount(): number {
   const timeout = 90000; // 90 seconds (increased from 60 for more devices)
 
   let count = 0;
+  let totalDevices = 0;
+  
   for (const device of knownDevices.values()) {
-    if (now - device.lastSeen < timeout) {
+    totalDevices++;
+    const timeSinceLastSeen = now - device.lastSeen;
+    const isActive = timeSinceLastSeen < timeout;
+    
+    if (isActive) {
       count++;
     }
+    
+    // Debug log for each device
+    console.log(`👥 [PEER CHECK] Device ${device.deviceId.substring(0, 8)}... | IP: ${device.ipAddress} | Last seen: ${Math.floor(timeSinceLastSeen / 1000)}s ago | Active: ${isActive}`);
   }
 
+  console.log(`👥 [PEER COUNT] Total known devices: ${totalDevices}, Active devices: ${count}`);
   return count;
 }
 

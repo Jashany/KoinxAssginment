@@ -30,7 +30,7 @@ export default function SyncStatus() {
       setTimeSinceSync(getTimeSinceLastSync());
       const pending = await getPendingBroadcastsCount();
       setPendingBroadcasts(pending);
-    }, 1000);
+    }, 10000);
 
     return () => clearInterval(interval);
   }, []);

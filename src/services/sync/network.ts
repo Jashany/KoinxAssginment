@@ -111,6 +111,8 @@ export function sendDelta(data: string | Uint8Array): Promise<void> {
     const message =
       typeof data === "string" ? new TextEncoder().encode(data) : data;
 
+    console.log(`🌐 [NETWORK] Broadcasting to ${BROADCAST_ADDR}:${PORT}, size: ${message.length} bytes`);
+
     // Send the message
     socket.send(
       message,
@@ -120,9 +122,10 @@ export function sendDelta(data: string | Uint8Array): Promise<void> {
       BROADCAST_ADDR,
       (err?: Error | null) => {
         if (err) {
-          console.error("Broadcast failed:", err);
+          console.error("❌ [NETWORK] Broadcast failed:", err);
           reject(err);
         } else {
+          console.log(`✅ [NETWORK] Broadcast sent successfully to ${BROADCAST_ADDR}:${PORT}`);
           resolve();
         }
       },
@@ -148,6 +151,8 @@ export function sendDeltaToPeer(data: string | Uint8Array, peerAddress: string):
     const message =
       typeof data === "string" ? new TextEncoder().encode(data) : data;
 
+    console.log(`🎯 [NETWORK] Unicasting to ${peerAddress}:${PORT}, size: ${message.length} bytes`);
+
     // Send the message to specific peer
     socket.send(
       message,
@@ -157,9 +162,10 @@ export function sendDeltaToPeer(data: string | Uint8Array, peerAddress: string):
       peerAddress,
       (err?: Error | null) => {
         if (err) {
-          console.error(`Unicast to ${peerAddress} failed:`, err);
+          console.error(`❌ [NETWORK] Unicast to ${peerAddress} failed:`, err);
           reject(err);
         } else {
+          console.log(`✅ [NETWORK] Unicast sent successfully to ${peerAddress}:${PORT}`);
           resolve();
         }
       },

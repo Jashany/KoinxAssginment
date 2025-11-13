@@ -66,7 +66,10 @@ export async function initDatabase(): Promise<void> {
  * Save a scan event to the database
  */
 export async function saveScanEvent(event: ScanEvent): Promise<void> {
-  if (!db) throw new Error('Database not initialized');
+  if (!db) {
+    console.warn('Database not initialized yet, cannot save scan event');
+    return;
+  }
 
   try {
     await db.runAsync(
@@ -84,7 +87,10 @@ export async function saveScanEvent(event: ScanEvent): Promise<void> {
  * Save multiple scan events in a transaction (for batch sync)
  */
 export async function saveScanEvents(events: ScanEvent[]): Promise<void> {
-  if (!db) throw new Error('Database not initialized');
+  if (!db) {
+    console.warn('Database not initialized yet, cannot save scan events');
+    return;
+  }
   if (events.length === 0) return;
 
   try {
@@ -221,7 +227,10 @@ export async function savePassType(qrCode: string, type: 'infinite' | 'one-use')
  * Update device state (for sequence number tracking)
  */
 export async function updateDeviceState(deviceInfo: DeviceInfo): Promise<void> {
-  if (!db) throw new Error('Database not initialized');
+  if (!db) {
+    console.warn('Database not initialized yet, cannot update device state');
+    return;
+  }
 
   try {
     await db.runAsync(
@@ -296,7 +305,10 @@ export async function getAllDeviceStates(): Promise<DeviceInfo[]> {
  * Add message to broadcast queue
  */
 export async function enqueueBroadcast(message: string): Promise<void> {
-  if (!db) throw new Error('Database not initialized');
+  if (!db) {
+    console.warn('Database not initialized yet, cannot enqueue broadcast');
+    return;
+  }
 
   try {
     await db.runAsync(
@@ -313,7 +325,10 @@ export async function enqueueBroadcast(message: string): Promise<void> {
  * Get pending broadcasts from queue
  */
 export async function getPendingBroadcasts(maxAttempts: number = 5): Promise<Array<{ id: number; message: string; attempts: number }>> {
-  if (!db) throw new Error('Database not initialized');
+  if (!db) {
+    console.warn('Database not initialized yet, returning empty array for pending broadcasts');
+    return [];
+  }
 
   try {
     const rows = await db.getAllAsync<{
@@ -385,7 +400,10 @@ export async function getTotalScanCount(): Promise<number> {
  * Get pending broadcast queue size
  */
 export async function getPendingBroadcastCount(): Promise<number> {
-  if (!db) throw new Error('Database not initialized');
+  if (!db) {
+    console.warn('Database not initialized yet, returning 0 for pending broadcast count');
+    return 0;
+  }
 
   try {
     const row = await db.getFirstAsync<{ count: number }>(
