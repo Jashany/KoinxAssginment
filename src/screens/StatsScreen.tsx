@@ -186,7 +186,7 @@ function PassCard({ code, pass }: { code: string; pass: PassEntry }) {
         {pass.type === "infinite" && pass.count !== undefined && (
           <View style={styles.countBadge}>
             <Text style={styles.countText}>
-              Count: {pass.count}
+              Total Scans: {pass.count}
             </Text>
           </View>
         )}
@@ -194,16 +194,34 @@ function PassCard({ code, pass }: { code: string; pass: PassEntry }) {
 
       <View style={styles.datesRow}>
         {Object.entries(DATE_LABELS).map(([key, label]) => {
-          const used = pass[key as keyof typeof DATE_LABELS];
+          const hasScans = pass[key as keyof typeof DATE_LABELS];
+
+          // For infinite passes, show scan activity differently
+          if (pass.type === "infinite") {
+            return (
+              <View
+                key={key}
+                style={[styles.datePill, hasScans && styles.datePillActive]}
+              >
+                <Text
+                  style={[styles.dateText, hasScans && styles.dateTextActive]}
+                >
+                  {label} {hasScans ? "✓" : ""}
+                </Text>
+              </View>
+            );
+          }
+
+          // For one-use passes, show "Used" status
           return (
             <View
               key={key}
-              style={[styles.datePill, used && styles.datePillUsed]}
+              style={[styles.datePill, hasScans && styles.datePillUsed]}
             >
               <Text
-                style={[styles.dateText, used && styles.dateTextUsed]}
+                style={[styles.dateText, hasScans && styles.dateTextUsed]}
               >
-                {used ? "Used" : ""} {label}
+                {hasScans ? "Used " : ""}{label}
               </Text>
             </View>
           );
@@ -313,6 +331,10 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.badgeBg,
     borderColor: COLORS.muted,
   },
+  datePillActive: {
+    backgroundColor: COLORS.success,
+    borderColor: COLORS.success,
+  },
   dateText: {
     color: COLORS.success,
     fontSize: 13,
@@ -320,6 +342,10 @@ const styles = StyleSheet.create({
   },
   dateTextUsed: {
     color: COLORS.secondary,
+  },
+  dateTextActive: {
+    color: "#0f172a",
+    fontWeight: "600",
   },
   empty: {
     textAlign: "center",

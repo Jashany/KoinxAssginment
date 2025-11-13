@@ -8,9 +8,11 @@ import * as Storage from "./storage";
  * Validate a scan before processing
  */
 export async function validateScan(qrCode: string): Promise<ScanValidationResult> {
-  const entry = getEntry(qrCode);
+  // Check if QR code exists in JSON config (this has all valid QR codes)
+  const jsonConfig = getJSONConfigState();
+  const configEntry = jsonConfig[qrCode];
 
-  if (!entry) {
+  if (!configEntry) {
     return {
       allowed: false,
       reason: "Unknown QR code",
@@ -21,7 +23,7 @@ export async function validateScan(qrCode: string): Promise<ScanValidationResult
   const todayScans = await Storage.getScansForQROnDate(qrCode, today);
 
   // For one-use passes, check if already used today
-  if (entry.type === "one-use") {
+  if (configEntry.type === "one-use") {
     if (todayScans.length > 0) {
       return {
         allowed: false,
@@ -32,13 +34,13 @@ export async function validateScan(qrCode: string): Promise<ScanValidationResult
   }
 
   // Check for duplicate scan within 5 minutes (for both types)
-  const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+  const fiveMinutesAgo = Date.now() - 30 * 1000;
   const recentScans = todayScans.filter(scan => scan.timestamp > fiveMinutesAgo);
 
   if (recentScans.length > 0) {
     return {
       allowed: false,
-      reason: "Already scanned within the last 5 minutes",
+      reason: "Already scanned within the last 30 seconds",
       todayScansCount: todayScans.length,
     };
   }
