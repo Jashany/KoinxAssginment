@@ -29,7 +29,8 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.jashan_2003.myexpoapp"
+      "package": "com.jashan_2003.myexpoapp",
+      "googleServicesFile": "./google-services.json"
     }
   }
 }

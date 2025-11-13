@@ -6,6 +6,9 @@ import { initSocket, setBroadcastAddr, sendDelta, sendDeltaToPeer } from "./netw
 import { LocalState, PassState, ScanEvent, StateMessage, DeviceInfo } from "./types";
 import * as Storage from "./storage";
 
+// Import initial QR config
+const INITIAL_QR_CONFIG = require('../../../qr_config.json');
+
 // UUID v4 generator using expo-crypto
 function uuidv4(): string {
   return Crypto.randomUUID();
@@ -17,6 +20,9 @@ let sequenceNumber: number = 0;
 
 // In-memory state (loaded from SQLite)
 let localState: LocalState = {};
+
+// JSON config state (from qr_config.json)
+let jsonConfigState: any = {};
 
 // Known peer devices
 const knownDevices: Map<string, DeviceInfo> = new Map();
@@ -162,12 +168,21 @@ export async function initializeP2P() {
     await initializePassTypes();
     console.log("✅ [INIT] Pass types initialized");
 
-    // 5. Load state from database
+    // 5. Load state from database (CRDT scan events)
     localState = await Storage.loadState(QR_CODES);
     const totalScans = Object.values(localState).reduce((sum, pass) => sum + pass.scans.length, 0);
     console.log(`✅ [INIT] State loaded from database: ${Object.keys(localState).length} QR codes, ${totalScans} total scans`);
 
-    // 6. Get IP and set broadcast address
+    // 6. Load or rebuild JSON config
+    await loadAndSaveJSONConfig();
+
+    // 7. If we have scans but JSON config is out of sync, rebuild it
+    if (totalScans > 0) {
+      console.log('🔄 [INIT] Rebuilding JSON config from existing scan events...');
+      await rebuildJSONConfigFromScans();
+    }
+
+    // 8. Get IP and set broadcast address
     try {
       const ip = await Network.getIpAddressAsync();
       console.log(`🌐 [INIT] Device IP from expo-network: ${ip}`);
@@ -201,28 +216,28 @@ export async function initializeP2P() {
       console.log("Using global broadcast: 255.255.255.255");
     }
 
-    // 7. Load known devices from database
+    // 9. Load known devices from database
     const devices = await Storage.getAllDeviceStates();
     devices.forEach(device => knownDevices.set(device.deviceId, device));
 
-    // 8. Request full state from peers (in case this is a new/recovering device)
+    // 10. Request full state from peers (in case this is a new/recovering device)
     await requestFullStateFromPeers().catch(err => {
       console.warn("Failed to request full state from peers (this is okay):", err);
     });
 
-    // 9. Start periodic full-state sync (every 30 seconds - good for 4-5 devices)
+    // 11. Start periodic full-state sync (every 30 seconds - good for 4-5 devices)
     startPeriodicSync();
 
-    // 10. Start broadcast queue processor
+    // 12. Start broadcast queue processor
     startBroadcastQueueProcessor();
 
-    // 11. Start heartbeat mechanism (every 10 seconds)
+    // 13. Start heartbeat mechanism (every 10 seconds)
     startHeartbeat();
 
-    // 12. Start ACK retry processor (every 2 seconds)
+    // 14. Start ACK retry processor (every 2 seconds)
     startAckRetryProcessor();
 
-    // 13. Start state reconciliation (every 20 seconds)
+    // 15. Start state reconciliation (every 20 seconds)
     startStateReconciliation();
 
     console.log("🎉 [INIT] P2P service initialized successfully with reliability features");
@@ -245,6 +260,127 @@ async function initializePassTypes() {
     const type = qrCode.includes('I') ? 'infinite' : 'one-use';
     await Storage.savePassType(qrCode, type);
   }
+}
+
+/**
+ * Load JSON config and save it to database
+ * This ensures the initial state is persisted and can be recovered
+ */
+async function loadAndSaveJSONConfig() {
+  try {
+    console.log('📋 [JSON CONFIG] Loading JSON configuration...');
+
+    // Try to load from database first (if app was restarted)
+    let savedConfig = await Storage.loadJSONConfig();
+
+    if (savedConfig) {
+      console.log('✅ [JSON CONFIG] Loaded existing config from database');
+      jsonConfigState = savedConfig;
+    } else {
+      // First time - load from initial file
+      console.log('🆕 [JSON CONFIG] Loading initial config from qr_config.json');
+      jsonConfigState = { ...INITIAL_QR_CONFIG };
+
+      // Save to database for persistence
+      await Storage.saveJSONConfig(jsonConfigState);
+      console.log('✅ [JSON CONFIG] Saved initial config to database');
+    }
+
+    // Log summary
+    const qrCount = Object.keys(jsonConfigState).length;
+    const infiniteCount = Object.values(jsonConfigState).filter(
+      (entry: any) => entry.type === 'infinite'
+    ).length;
+    const oneUseCount = qrCount - infiniteCount;
+
+    console.log(`📊 [JSON CONFIG] Config loaded: ${qrCount} QR codes (${infiniteCount} infinite, ${oneUseCount} one-use)`);
+  } catch (error) {
+    console.error('❌ [JSON CONFIG] Error loading/saving JSON config:', error);
+    // Fallback to initial config
+    jsonConfigState = { ...INITIAL_QR_CONFIG };
+  }
+}
+
+/**
+ * Update JSON config with scan and persist changes
+ */
+async function updateJSONConfigWithScan(qrCode: string, date: string) {
+  if (!jsonConfigState[qrCode]) {
+    console.warn(`⚠️  [JSON CONFIG] QR code ${qrCode} not found in config`);
+    return;
+  }
+
+  const entry = jsonConfigState[qrCode];
+
+  // Update the date flag
+  if (entry.hasOwnProperty(date)) {
+    entry[date] = true;
+  }
+
+  // Update count for infinite passes
+  if (entry.type === 'infinite' && entry.hasOwnProperty('count')) {
+    entry.count = (entry.count || 0) + 1;
+  }
+
+  // Persist to database
+  await Storage.saveJSONConfig(jsonConfigState);
+
+  console.log(`✅ [JSON CONFIG] Updated ${qrCode}: ${date} = true${entry.type === 'infinite' ? `, count = ${entry.count}` : ''}`);
+}
+
+/**
+ * Rebuild JSON config from CRDT scan events
+ * This is used when recovering state or syncing with peers
+ */
+async function rebuildJSONConfigFromScans() {
+  console.log('🔄 [JSON CONFIG] Rebuilding JSON config from scan events...');
+
+  // Start with the initial config structure
+  const rebuiltConfig = { ...INITIAL_QR_CONFIG };
+
+  // Process all scans to update the config
+  for (const qrCode in localState) {
+    if (!rebuiltConfig[qrCode]) {
+      console.warn(`⚠️  [JSON CONFIG] QR code ${qrCode} not in initial config, skipping`);
+      continue;
+    }
+
+    const entry = rebuiltConfig[qrCode];
+    const scans = localState[qrCode].scans;
+
+    // Reset counts
+    if (entry.type === 'infinite') {
+      entry.count = 0;
+    }
+
+    // Process each scan
+    for (const scan of scans) {
+      // Set date flag
+      if (entry.hasOwnProperty(scan.date)) {
+        entry[scan.date] = true;
+      }
+
+      // Increment count for infinite passes
+      if (entry.type === 'infinite' && entry.hasOwnProperty('count')) {
+        entry.count = (entry.count || 0) + 1;
+      }
+    }
+  }
+
+  // Update the global state
+  jsonConfigState = rebuiltConfig;
+
+  // Persist to database
+  await Storage.saveJSONConfig(jsonConfigState);
+
+  console.log('✅ [JSON CONFIG] Rebuilt and saved JSON config from scan events');
+}
+
+/**
+ * Get the JSON config state (for UI display)
+ */
+export function getJSONConfigState(): any {
+  return jsonConfigState;
 }
 
 /**
@@ -306,6 +442,9 @@ export async function addScanEvent(qrCode: string, date: string): Promise<ScanEv
   // Save to database
   await Storage.saveScanEvent(event);
   console.log('✅ [LOCAL SCAN] Saved to SQLite database');
+
+  // Update JSON config state
+  await updateJSONConfigWithScan(qrCode, date);
 
   // Broadcast to peers
   await broadcastDelta([event]);
@@ -572,7 +711,13 @@ async function mergeDeltaScans(incomingScans: ScanEvent[]) {
   if (newScans.length > 0) {
     await Storage.saveScanEvents(newScans);
     console.log(`💾 [MERGE] Saved ${newScans.length} new scans to SQLite database`);
-    
+
+    // Update JSON config for each new scan
+    for (const scan of newScans) {
+      await updateJSONConfigWithScan(scan.qrCode, scan.date);
+    }
+    console.log(`✅ [MERGE] Updated JSON config for ${newScans.length} new scans`);
+
     // Log summary
     const qrCodeCounts: { [key: string]: number } = {};
     newScans.forEach(scan => {

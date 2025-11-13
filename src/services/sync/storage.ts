@@ -483,6 +483,50 @@ export async function getOrCreateDeviceId(generateId: () => string): Promise<str
 }
 
 /**
+ * Save JSON config state to settings
+ */
+export async function saveJSONConfig(config: any): Promise<void> {
+  if (!db) throw new Error('Database not initialized');
+
+  try {
+    const configStr = JSON.stringify(config);
+    await db.runAsync(
+      'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+      ['json_config', configStr]
+    );
+    console.log('✅ [DB] JSON config saved to database');
+  } catch (error) {
+    console.error('Failed to save JSON config:', error);
+    throw error;
+  }
+}
+
+/**
+ * Load JSON config state from settings
+ */
+export async function loadJSONConfig(): Promise<any | null> {
+  if (!db) throw new Error('Database not initialized');
+
+  try {
+    const row = await db.getFirstAsync<{ value: string }>(
+      'SELECT value FROM settings WHERE key = ?',
+      ['json_config']
+    );
+
+    if (row) {
+      const config = JSON.parse(row.value);
+      console.log(`✅ [DB] Loaded JSON config from database (${Object.keys(config).length} QR codes)`);
+      return config;
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Failed to load JSON config:', error);
+    return null;
+  }
+}
+
+/**
  * Clear all data (for testing/reset)
  */
 export async function clearAllData(): Promise<void> {
