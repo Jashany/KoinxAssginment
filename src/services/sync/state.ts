@@ -21,8 +21,24 @@ let localState: LocalState = {};
 // Known peer devices
 const knownDevices: Map<string, DeviceInfo> = new Map();
 
+// Pending messages awaiting ACK (messageId -> PendingMessage)
+const pendingAcks: Map<string, { message: string; peerIp: string; timestamp: number; attempts: number; peerId: string }> = new Map();
+
+// Received message IDs for deduplication (keep last 1000)
+const receivedMessageIds: Set<string> = new Set();
+const MAX_RECEIVED_IDS = 1000;
+
 // Periodic sync interval
 let syncInterval: ReturnType<typeof setInterval> | null = null;
+
+// Heartbeat interval
+let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+
+// ACK retry interval
+let ackRetryInterval: ReturnType<typeof setInterval> | null = null;
+
+// State hash reconciliation interval
+let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
 
 // QR codes list (hardcoded for now)
 export const QR_CODES = [
@@ -51,8 +67,76 @@ export const QR_CODES = [
 ];
 
 /**
+ * Calculate hash of current state for reconciliation
+ * Uses a simple hash of all scanIds sorted
+ */
+function calculateStateHash(): string {
+  const allScanIds: string[] = [];
+
+  for (const qrCode in localState) {
+    for (const scan of localState[qrCode].scans) {
+      allScanIds.push(scan.scanId);
+    }
+  }
+
+  // Sort for deterministic hash
+  allScanIds.sort();
+
+  // Simple hash: concatenate and use length + first/last IDs
+  if (allScanIds.length === 0) return "empty";
+
+  const hash = `${allScanIds.length}-${allScanIds[0].substring(0, 8)}-${allScanIds[allScanIds.length - 1].substring(0, 8)}`;
+  return hash;
+}
+
+/**
+ * Add message ID to received set for deduplication
+ */
+function markMessageAsReceived(messageId: string) {
+  receivedMessageIds.add(messageId);
+
+  // Keep set size manageable
+  if (receivedMessageIds.size > MAX_RECEIVED_IDS) {
+    const idsArray = Array.from(receivedMessageIds);
+    const toRemove = idsArray.slice(0, 100); // Remove oldest 100
+    toRemove.forEach(id => receivedMessageIds.delete(id));
+  }
+}
+
+/**
+ * Check if message was already received
+ */
+function isMessageReceived(messageId: string): boolean {
+  return receivedMessageIds.has(messageId);
+}
+
+/**
+ * Send ACK for a received message
+ */
+async function sendAck(messageId: string, peerIp: string, peerDeviceId: string) {
+  sequenceNumber++;
+
+  const ackMessage: StateMessage = {
+    type: 'ack',
+    ackMessageId: messageId,
+    sequenceNum: sequenceNumber,
+    deviceId,
+    timestamp: Date.now(),
+  };
+
+  const messageStr = JSON.stringify(ackMessage);
+
+  try {
+    await sendDeltaToPeer(messageStr, peerIp);
+    console.log(`✅ [ACK] Sent ACK for message ${messageId.substring(0, 8)}... to peer ${peerDeviceId.substring(0, 8)}...`);
+  } catch (error) {
+    console.error(`❌ [ACK] Failed to send ACK to ${peerIp}:`, error);
+  }
+}
+
+/**
  * Initialize P2P service with CRDT-based sync
- * Optimized for 4-5 devices
+ * Optimized for 4-5 devices with reliability features
  */
 export async function initializeP2P() {
   try {
@@ -64,10 +148,11 @@ export async function initializeP2P() {
     await Storage.initDatabase();
     console.log("✅ [INIT] SQLite database initialized");
 
-    // 2. Generate or load device ID
-    deviceId = uuidv4();
+    // 2. Get or create persistent device ID
+    deviceId = await Storage.getOrCreateDeviceId(uuidv4);
     console.log(`✅ [INIT] Device ID: ${deviceId}`);
     console.log(`   [INIT] Short ID: ${deviceId.substring(0, 8)}...`);
+    console.log(`   [INIT] Device identity will persist across app restarts`);
 
     // 3. Initialize UDP socket
     await initSocket();
@@ -86,22 +171,34 @@ export async function initializeP2P() {
     try {
       const ip = await Network.getIpAddressAsync();
       console.log(`🌐 [INIT] Device IP from expo-network: ${ip}`);
-      
+
       if (ip && ip !== "0.0.0.0") {
-        console.log("Trying common hotspot broadcast addresses:");
-        console.log("  - 192.168.43.255 (Android hotspot)");
-        console.log("  - 192.168.137.255 (Windows hotspot)");
-        console.log("  - 172.20.10.255 (iPhone hotspot)");
-        
-        // Default to Android hotspot (most common)
-        setBroadcastAddr("192.168.43.255");
-        console.log("Using broadcast: 192.168.43.255");
-        console.log("Note: Unicast will work once peers are discovered");
+        // Calculate broadcast address based on IP (assuming /24 subnet)
+        const ipParts = ip.split('.');
+        if (ipParts.length === 4) {
+          // For /24 network (255.255.255.0), broadcast is x.x.x.255
+          const broadcastAddr = `${ipParts[0]}.${ipParts[1]}.${ipParts[2]}.255`;
+          setBroadcastAddr(broadcastAddr);
+          console.log(`✅ [INIT] Calculated broadcast address: ${broadcastAddr} (from IP: ${ip})`);
+        } else {
+          console.warn(`⚠️  [INIT] Invalid IP format: ${ip}, using fallback`);
+          setBroadcastAddr("255.255.255.255");
+          console.log("Using global broadcast: 255.255.255.255");
+        }
+      } else {
+        console.warn("⚠️  [INIT] No valid IP detected, using global broadcast");
+        setBroadcastAddr("255.255.255.255");
+        console.log("Using global broadcast: 255.255.255.255");
       }
+
+      console.log("📡 [INIT] Network Discovery:");
+      console.log("   - Initial discovery uses broadcast");
+      console.log("   - Subsequent messages use unicast to known peers");
+      console.log("   - Heartbeat every 10s keeps connections alive");
     } catch (ipError) {
       console.warn("Failed to get IP address, using fallback:", ipError);
-      setBroadcastAddr("192.168.43.255");
-      console.log("Using fallback broadcast: 192.168.43.255");
+      setBroadcastAddr("255.255.255.255");
+      console.log("Using global broadcast: 255.255.255.255");
     }
 
     // 7. Load known devices from database
@@ -119,7 +216,21 @@ export async function initializeP2P() {
     // 10. Start broadcast queue processor
     startBroadcastQueueProcessor();
 
-    console.log("P2P service initialized successfully");
+    // 11. Start heartbeat mechanism (every 10 seconds)
+    startHeartbeat();
+
+    // 12. Start ACK retry processor (every 2 seconds)
+    startAckRetryProcessor();
+
+    // 13. Start state reconciliation (every 20 seconds)
+    startStateReconciliation();
+
+    console.log("🎉 [INIT] P2P service initialized successfully with reliability features");
+    console.log("   [INIT] - Heartbeat: Every 10s");
+    console.log("   [INIT] - Full sync: Every 30s");
+    console.log("   [INIT] - ACK retry: Every 2s");
+    console.log("   [INIT] - State reconciliation: Every 20s");
+    console.log("   [INIT] - Peer timeout: 30s");
   } catch (err) {
     console.error("Error initializing P2P:", err);
     throw err; // Re-throw so the caller knows initialization failed
@@ -203,13 +314,15 @@ export async function addScanEvent(qrCode: string, date: string): Promise<ScanEv
 }
 
 /**
- * Broadcast delta changes to all peers (using unicast)
+ * Broadcast delta changes to all peers (using unicast with ACK tracking)
  */
 async function broadcastDelta(deltas: ScanEvent[]) {
   sequenceNumber++;
+  const messageId = uuidv4(); // Unique ID for ACK tracking
 
   const message: StateMessage = {
     type: 'delta',
+    messageId,
     deltas,
     sequenceNum: sequenceNumber,
     deviceId,
@@ -218,6 +331,7 @@ async function broadcastDelta(deltas: ScanEvent[]) {
 
   console.log('📤 [SENDING DELTA] Preparing to send delta:', {
     type: message.type,
+    messageId: messageId.substring(0, 8) + '...',
     deltasCount: deltas.length,
     sequenceNum: sequenceNumber,
     deviceId: deviceId.substring(0, 8) + '...',
@@ -231,9 +345,50 @@ async function broadcastDelta(deltas: ScanEvent[]) {
   const messageStr = JSON.stringify(message);
   console.log(`📦 [SENDING DELTA] Message size: ${messageStr.length} bytes`);
 
-  // Send to each known peer individually (unicast)
-  await sendToAllPeers(messageStr);
+  // Send to each known peer individually (unicast) and track for ACK
+  await sendToAllPeersWithAck(messageStr, messageId);
   console.log(`✅ [SENDING DELTA] Sent delta with ${deltas.length} scans to ${knownDevices.size} peers`);
+}
+
+/**
+ * Send to all peers with ACK tracking
+ */
+async function sendToAllPeersWithAck(messageStr: string, messageId: string) {
+  const peers = Array.from(knownDevices.values()).filter(p => p.ipAddress);
+
+  if (peers.length === 0) {
+    // No known peers yet, use broadcast for discovery (no ACK tracking for broadcast)
+    console.log('🔍 [SEND WITH ACK] No known peers, using broadcast for discovery');
+    try {
+      await sendDelta(messageStr);
+      console.log('✅ [SEND WITH ACK] Broadcast sent successfully');
+    } catch (error) {
+      console.error('❌ [SEND WITH ACK] Failed to send broadcast:', error);
+      await Storage.enqueueBroadcast(messageStr);
+    }
+    return;
+  }
+
+  // Send to each peer and track for ACK
+  for (const peer of peers) {
+    try {
+      await sendDeltaToPeer(messageStr, peer.ipAddress!);
+
+      // Track this message for ACK
+      const ackKey = `${messageId}-${peer.deviceId}`;
+      pendingAcks.set(ackKey, {
+        message: messageStr,
+        peerIp: peer.ipAddress!,
+        timestamp: Date.now(),
+        attempts: 1,
+        peerId: peer.deviceId,
+      });
+
+      console.log(`✅ [SEND WITH ACK] Sent to ${peer.ipAddress}, tracking ACK: ${ackKey.substring(0, 16)}...`);
+    } catch (error) {
+      console.error(`❌ [SEND WITH ACK] Failed to send to ${peer.ipAddress}:`, error);
+    }
+  }
 }
 
 /**
@@ -242,7 +397,7 @@ async function broadcastDelta(deltas: ScanEvent[]) {
 serviceEvents.on("message", async (messageStr: string, rinfo: any) => {
   try {
     console.log(`📥 [RECEIVED] Message from ${rinfo?.address}:${rinfo?.port}, size: ${messageStr.length} bytes`);
-    
+
     const message: StateMessage = JSON.parse(messageStr);
 
     console.log(`📨 [RECEIVED] Message type: ${message.type}, from device: ${message.deviceId.substring(0, 8)}..., seq: ${message.sequenceNum}`);
@@ -253,23 +408,41 @@ serviceEvents.on("message", async (messageStr: string, rinfo: any) => {
       return;
     }
 
+    // Check for duplicate messages
+    if (message.messageId && isMessageReceived(message.messageId)) {
+      console.log(`⏭️  [RECEIVED] Duplicate message ${message.messageId.substring(0, 8)}..., ignoring`);
+      return;
+    }
+
+    // Mark message as received
+    if (message.messageId) {
+      markMessageAsReceived(message.messageId);
+    }
+
     // Update known devices with IP address for unicast
+    const existingDevice = knownDevices.get(message.deviceId);
     const deviceInfo: DeviceInfo = {
       deviceId: message.deviceId,
       lastSequence: message.sequenceNum,
       lastSeen: Date.now(),
-      ipAddress: rinfo?.address, // Capture sender's IP
+      lastHeartbeat: message.type === 'heartbeat' ? Date.now() : existingDevice?.lastHeartbeat,
+      ipAddress: rinfo?.address,
+      stateHash: message.stateHash || existingDevice?.stateHash,
+      connectionState: 'connected',
     };
-    
+
     // Check if this is a new peer
     const isNewPeer = !knownDevices.has(message.deviceId);
-    
+
     knownDevices.set(message.deviceId, deviceInfo);
     await Storage.updateDeviceState(deviceInfo);
-    
+
     if (isNewPeer) {
       console.log(`🆕 NEW PEER DISCOVERED: ${message.deviceId.substring(0, 8)}... at IP: ${rinfo?.address}`);
       printPeerIPs();
+
+      // Request full state from new peer
+      await requestFullStateFromPeers();
     } else {
       console.log(`👋 [RECEIVED] Known peer ${message.deviceId.substring(0, 8)}... at ${rinfo?.address}`);
     }
@@ -284,6 +457,11 @@ serviceEvents.on("message", async (messageStr: string, rinfo: any) => {
           });
           await mergeDeltaScans(message.deltas);
         }
+
+        // Send ACK back to sender
+        if (message.messageId && rinfo?.address) {
+          await sendAck(message.messageId, rinfo.address, message.deviceId);
+        }
         break;
 
       case 'full-state':
@@ -297,8 +475,46 @@ serviceEvents.on("message", async (messageStr: string, rinfo: any) => {
 
       case 'state-request':
         console.log(`📢 [RECEIVED STATE-REQUEST] Peer requesting full state, sending ours...`);
-        // Someone is requesting full state, send ours
         await broadcastFullState();
+        break;
+
+      case 'ack':
+        if (message.ackMessageId) {
+          console.log(`✅ [RECEIVED ACK] Got ACK for message ${message.ackMessageId.substring(0, 8)}... from ${message.deviceId.substring(0, 8)}...`);
+
+          // Remove from pending ACKs
+          const ackKey = `${message.ackMessageId}-${message.deviceId}`;
+          if (pendingAcks.has(ackKey)) {
+            pendingAcks.delete(ackKey);
+            console.log(`✅ [ACK] Removed from pending: ${ackKey.substring(0, 16)}... (${pendingAcks.size} pending)`);
+          }
+        }
+        break;
+
+      case 'heartbeat':
+        console.log(`💓 [HEARTBEAT] Received from ${message.deviceId.substring(0, 8)}... at ${rinfo?.address}`);
+        // Device info already updated above
+        break;
+
+      case 'state-hash':
+        if (message.stateHash) {
+          const ourHash = calculateStateHash();
+          console.log(`🔍 [STATE HASH] Peer: ${message.stateHash}, Ours: ${ourHash}`);
+
+          if (message.stateHash !== ourHash) {
+            console.log(`⚠️  [STATE HASH] State mismatch detected! Requesting full state...`);
+            await requestFullStateFromPeers();
+          } else {
+            console.log(`✅ [STATE HASH] States match!`);
+
+            // Update connection state to synced
+            const device = knownDevices.get(message.deviceId);
+            if (device) {
+              device.connectionState = 'synced';
+              knownDevices.set(message.deviceId, device);
+            }
+          }
+        }
         break;
     }
   } catch (error) {
@@ -499,6 +715,137 @@ async function broadcastFullState() {
 }
 
 /**
+ * Start heartbeat mechanism (every 10 seconds)
+ * Sends lightweight heartbeat messages to maintain peer connections
+ */
+function startHeartbeat() {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+  }
+
+  heartbeatInterval = setInterval(async () => {
+    sequenceNumber++;
+
+    const heartbeatMessage: StateMessage = {
+      type: 'heartbeat',
+      sequenceNum: sequenceNumber,
+      deviceId,
+      timestamp: Date.now(),
+      stateHash: calculateStateHash(), // Include state hash for quick verification
+    };
+
+    const messageStr = JSON.stringify(heartbeatMessage);
+
+    // Send heartbeat to all known peers
+    const peers = Array.from(knownDevices.values()).filter(p => p.ipAddress);
+
+    if (peers.length > 0) {
+      console.log(`💓 [HEARTBEAT] Sending to ${peers.length} peers...`);
+
+      for (const peer of peers) {
+        try {
+          await sendDeltaToPeer(messageStr, peer.ipAddress!);
+        } catch (error) {
+          console.error(`❌ [HEARTBEAT] Failed to send to ${peer.ipAddress}:`, error);
+        }
+      }
+    }
+  }, 10000); // 10 seconds
+}
+
+/**
+ * Start ACK retry processor (every 2 seconds)
+ * Retries messages that haven't been acknowledged
+ */
+function startAckRetryProcessor() {
+  if (ackRetryInterval) {
+    clearInterval(ackRetryInterval);
+  }
+
+  ackRetryInterval = setInterval(async () => {
+    const now = Date.now();
+    const ACK_TIMEOUT = 5000; // 5 seconds
+    const MAX_ATTEMPTS = 5;
+
+    const toRetry: Array<[string, any]> = [];
+
+    // Find messages that need retry
+    for (const [ackKey, pending] of pendingAcks.entries()) {
+      const timeSinceSent = now - pending.timestamp;
+
+      if (timeSinceSent > ACK_TIMEOUT) {
+        if (pending.attempts >= MAX_ATTEMPTS) {
+          // Give up after max attempts
+          console.log(`❌ [ACK RETRY] Giving up on ${ackKey.substring(0, 16)}... after ${MAX_ATTEMPTS} attempts`);
+          pendingAcks.delete(ackKey);
+        } else {
+          toRetry.push([ackKey, pending]);
+        }
+      }
+    }
+
+    // Retry messages
+    for (const [ackKey, pending] of toRetry) {
+      try {
+        console.log(`🔄 [ACK RETRY] Retrying ${ackKey.substring(0, 16)}... (attempt ${pending.attempts + 1}/${MAX_ATTEMPTS})`);
+        await sendDeltaToPeer(pending.message, pending.peerIp);
+
+        // Update attempts and timestamp
+        pending.attempts++;
+        pending.timestamp = now;
+        pendingAcks.set(ackKey, pending);
+      } catch (error) {
+        console.error(`❌ [ACK RETRY] Retry failed for ${ackKey.substring(0, 16)}...:`, error);
+      }
+    }
+
+    if (toRetry.length > 0) {
+      console.log(`📊 [ACK RETRY] Retried ${toRetry.length} messages, ${pendingAcks.size} still pending`);
+    }
+  }, 2000); // 2 seconds
+}
+
+/**
+ * Start state reconciliation (every 20 seconds)
+ * Sends state hash to peers for verification
+ */
+function startStateReconciliation() {
+  if (reconciliationInterval) {
+    clearInterval(reconciliationInterval);
+  }
+
+  reconciliationInterval = setInterval(async () => {
+    sequenceNumber++;
+
+    const stateHash = calculateStateHash();
+    const hashMessage: StateMessage = {
+      type: 'state-hash',
+      stateHash,
+      sequenceNum: sequenceNumber,
+      deviceId,
+      timestamp: Date.now(),
+    };
+
+    const messageStr = JSON.stringify(hashMessage);
+
+    // Send to all known peers
+    const peers = Array.from(knownDevices.values()).filter(p => p.ipAddress);
+
+    if (peers.length > 0) {
+      console.log(`🔍 [RECONCILIATION] Sending state hash (${stateHash}) to ${peers.length} peers...`);
+
+      for (const peer of peers) {
+        try {
+          await sendDeltaToPeer(messageStr, peer.ipAddress!);
+        } catch (error) {
+          console.error(`❌ [RECONCILIATION] Failed to send to ${peer.ipAddress}:`, error);
+        }
+      }
+    }
+  }, 20000); // 20 seconds
+}
+
+/**
  * Start periodic full-state sync (every 30 seconds)
  * Optimized for 4-5 devices - frequency is appropriate
  */
@@ -508,7 +855,7 @@ function startPeriodicSync() {
   }
 
   syncInterval = setInterval(async () => {
-    console.log('Running periodic full-state sync...');
+    console.log('🔄 [PERIODIC SYNC] Running periodic full-state sync...');
     await broadcastFullState();
   }, 30000); // 30 seconds
 }
@@ -552,11 +899,11 @@ function startBroadcastQueueProcessor() {
 
 /**
  * Get connected devices count
- * Increased timeout to 90 seconds for 4-5 device scenarios
+ * Reduced timeout to 30 seconds for faster failure detection with heartbeat support
  */
 export function getConnectedDevicesCount(): number {
   const now = Date.now();
-  const timeout = 90000; // 90 seconds (increased from 60 for more devices)
+  const timeout = 30000; // 30 seconds (reduced from 90 - heartbeats keep connections alive)
 
   let count = 0;
   let totalDevices = 0;
@@ -584,7 +931,7 @@ export function getConnectedDevicesCount(): number {
  */
 export function getConnectedPeers(): Array<{ deviceId: string; ipAddress: string; lastSeen: number }> {
   const now = Date.now();
-  const timeout = 90000; // 90 seconds
+  const timeout = 30000; // 30 seconds
 
   const peers: Array<{ deviceId: string; ipAddress: string; lastSeen: number }> = [];
   
@@ -644,9 +991,33 @@ export async function getPendingBroadcastsCount(): Promise<number> {
 }
 
 /**
+ * Get pending ACKs count (messages waiting for acknowledgment)
+ */
+export function getPendingAcksCount(): number {
+  return pendingAcks.size;
+}
+
+/**
  * Shutdown P2P service
  */
 export function shutdownP2P() {
   stopPeriodicSync();
-  console.log('P2P service shutdown');
+
+  // Stop all intervals
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
+
+  if (ackRetryInterval) {
+    clearInterval(ackRetryInterval);
+    ackRetryInterval = null;
+  }
+
+  if (reconciliationInterval) {
+    clearInterval(reconciliationInterval);
+    reconciliationInterval = null;
+  }
+
+  console.log('🛑 [SHUTDOWN] P2P service shutdown - all intervals stopped');
 }

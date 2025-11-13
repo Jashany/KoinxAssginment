@@ -6,6 +6,23 @@ const DB_NAME = 'offline_scanner.db';
 let db: SQLite.SQLiteDatabase | null = null;
 
 /**
+ * Check if a column exists in a table
+ */
+async function columnExists(tableName: string, columnName: string): Promise<boolean> {
+  if (!db) throw new Error('Database not initialized');
+
+  try {
+    const result = await db.getAllAsync<{ name: string }>(
+      `PRAGMA table_info(${tableName})`
+    );
+    return result.some(col => col.name === columnName);
+  } catch (error) {
+    console.error(`Error checking column ${columnName} in ${tableName}:`, error);
+    return false;
+  }
+}
+
+/**
  * Initialize the SQLite database and create tables if they don't exist
  */
 export async function initDatabase(): Promise<void> {
@@ -44,6 +61,22 @@ export async function initDatabase(): Promise<void> {
       );
     `);
 
+    // Migration: Add ip_address column if it doesn't exist
+    const hasIpAddress = await columnExists('device_state', 'ip_address');
+    if (!hasIpAddress) {
+      console.log('📦 [MIGRATION] Adding ip_address column to device_state table...');
+      await db.execAsync(`ALTER TABLE device_state ADD COLUMN ip_address TEXT;`);
+      console.log('✅ [MIGRATION] ip_address column added successfully');
+    }
+
+    // Create settings table (for persistent device ID and other settings)
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+
     // Create broadcast_queue table (for retry mechanism)
     await db.execAsync(`
       CREATE TABLE IF NOT EXISTS broadcast_queue (
@@ -55,9 +88,9 @@ export async function initDatabase(): Promise<void> {
       );
     `);
 
-    console.log('SQLite database initialized successfully');
+    console.log('✅ [DB] SQLite database initialized successfully');
   } catch (error) {
-    console.error('Failed to initialize database:', error);
+    console.error('❌ [DB] Failed to initialize database:', error);
     throw error;
   }
 }
@@ -418,6 +451,38 @@ export async function getPendingBroadcastCount(): Promise<number> {
 }
 
 /**
+ * Get or create persistent device ID
+ */
+export async function getOrCreateDeviceId(generateId: () => string): Promise<string> {
+  if (!db) throw new Error('Database not initialized');
+
+  try {
+    // Try to get existing device ID
+    const row = await db.getFirstAsync<{ value: string }>(
+      'SELECT value FROM settings WHERE key = ?',
+      ['device_id']
+    );
+
+    if (row) {
+      console.log(`✅ [DEVICE ID] Loaded existing device ID: ${row.value.substring(0, 8)}...`);
+      return row.value;
+    }
+
+    // Generate new device ID
+    const newDeviceId = generateId();
+    await db.runAsync(
+      'INSERT INTO settings (key, value) VALUES (?, ?)',
+      ['device_id', newDeviceId]
+    );
+    console.log(`🆕 [DEVICE ID] Created new device ID: ${newDeviceId.substring(0, 8)}...`);
+    return newDeviceId;
+  } catch (error) {
+    console.error('Failed to get or create device ID:', error);
+    throw error;
+  }
+}
+
+/**
  * Clear all data (for testing/reset)
  */
 export async function clearAllData(): Promise<void> {
@@ -429,6 +494,7 @@ export async function clearAllData(): Promise<void> {
       await db!.runAsync('DELETE FROM pass_types');
       await db!.runAsync('DELETE FROM device_state');
       await db!.runAsync('DELETE FROM broadcast_queue');
+      await db!.runAsync('DELETE FROM settings');
     });
     console.log('All data cleared successfully');
   } catch (error) {

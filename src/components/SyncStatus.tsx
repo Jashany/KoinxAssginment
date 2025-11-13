@@ -4,6 +4,7 @@ import {
   getConnectedDevicesCount,
   getTimeSinceLastSync,
   getPendingBroadcastsCount,
+  getPendingAcksCount,
 } from "../services/sync";
 
 const COLORS = {
@@ -22,15 +23,17 @@ export default function SyncStatus() {
   const [connectedDevices, setConnectedDevices] = useState(0);
   const [timeSinceSync, setTimeSinceSync] = useState(0);
   const [pendingBroadcasts, setPendingBroadcasts] = useState(0);
+  const [pendingAcks, setPendingAcks] = useState(0);
 
   useEffect(() => {
-    // Update status every second
+    // Update status every 2 seconds (faster updates for better monitoring)
     const interval = setInterval(async () => {
       setConnectedDevices(getConnectedDevicesCount());
       setTimeSinceSync(getTimeSinceLastSync());
       const pending = await getPendingBroadcastsCount();
       setPendingBroadcasts(pending);
-    }, 10000);
+      setPendingAcks(getPendingAcksCount());
+    }, 2000);
 
     return () => clearInterval(interval);
   }, []);
@@ -66,11 +69,22 @@ export default function SyncStatus() {
           <Text style={styles.metricValue}>{connectedDevices}</Text>
           <Text style={styles.metricLabel}>Peers</Text>
         </View>
+        {(pendingBroadcasts > 0 || pendingAcks > 0) && (
+          <>
+            <View style={styles.metricDivider} />
+            <View style={styles.metric}>
+              <Text style={[styles.metricValue, { color: pendingAcks > 0 ? COLORS.warning : COLORS.success }]}>
+                {pendingAcks}
+              </Text>
+              <Text style={styles.metricLabel}>ACKs</Text>
+            </View>
+          </>
+        )}
         {pendingBroadcasts > 0 && (
           <>
             <View style={styles.metricDivider} />
             <View style={styles.metric}>
-              <Text style={[styles.metricValue, { color: COLORS.warning }]}>
+              <Text style={[styles.metricValue, { color: COLORS.error }]}>
                 {pendingBroadcasts}
               </Text>
               <Text style={styles.metricLabel}>Queue</Text>

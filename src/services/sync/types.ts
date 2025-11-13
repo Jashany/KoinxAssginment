@@ -15,9 +15,12 @@ export interface PassState {
 export type LocalState = Record<string, PassState>;
 
 export interface StateMessage {
-  type: "delta" | "full-state" | "state-request";
+  type: "delta" | "full-state" | "state-request" | "ack" | "heartbeat" | "state-hash";
+  messageId?: string;        // Unique message ID for ACK tracking
+  ackMessageId?: string;     // ID of message being acknowledged
   deltas?: ScanEvent[];      // New scans since last broadcast
   fullState?: LocalState;    // Complete state (for full sync)
+  stateHash?: string;        // Hash of current state for verification
   sequenceNum: number;       // Per-device sequence number
   deviceId: string;          // Sender's device ID
   timestamp: number;         // Message creation time
@@ -27,7 +30,19 @@ export interface DeviceInfo {
   deviceId: string;
   lastSequence: number;
   lastSeen: number;
-  ipAddress?: string; // Peer's IP address for unicast
+  lastHeartbeat?: number;    // Last heartbeat received
+  ipAddress?: string;        // Peer's IP address for unicast
+  stateHash?: string;        // Last known state hash from peer
+  connectionState?: 'discovering' | 'connected' | 'synced' | 'lost'; // Connection status
+}
+
+export interface PendingMessage {
+  messageId: string;
+  message: string;
+  timestamp: number;
+  attempts: number;
+  peerDeviceId: string;
+  peerIpAddress: string;
 }
 
 export interface ScanValidationResult {
